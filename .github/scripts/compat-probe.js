@@ -102,7 +102,7 @@ function classifyStderr(stderr) {
  * pass a stub. The 30s timeout matches the user's worst-case cold-start
  * for a fresh `morphe-desktop.jar` (mostly JVM warmup).
  */
-async function probe({ config, repoVersions, toolsDir = './tools', execImpl = execFileAsync }) {
+async function probe({ config, repoVersions, toolsDir = './tools', execImpl = execFileAsync, excludedApps = [] }) {
   const rows = [];
 
   if (!config || !config.patch_repos || typeof config.patch_repos !== 'object') {
@@ -123,7 +123,14 @@ async function probe({ config, repoVersions, toolsDir = './tools', execImpl = ex
     return rows;
   }
 
+  // Apps excluded upstream have no .mpp on disk (the download step
+  // skipped their repo too), so probing them would only report a
+  // missing file. Skip them — the exclusion is already reported by
+  // check-versions and preflight.
+  const excluded = new Set(excludedApps);
+
   for (const [appId, entry] of Object.entries(config.patch_repos)) {
+    if (excluded.has(appId)) continue;
     const repo = entry.repo;
     const tag = patchTag(appId, entry, repoVersions);
     const mppPath = path.join(toolsDir, `${patchSlug(appId, entry, repoVersions)}.mpp`);
@@ -227,6 +234,15 @@ if (require.main === module) {
   const repoVersionsJson = process.env.REPO_VERSIONS || '{}';
   const summaryPath = process.env.GITHUB_STEP_SUMMARY || '';
   const toolsDir = process.env.TOOLS_DIR || './tools';
+  let excludedApps = [];
+  if (process.env.EXCLUDED_APPS) {
+    try {
+      excludedApps = JSON.parse(process.env.EXCLUDED_APPS);
+    } catch (e) {
+      console.error(`::error::EXCLUDED_APPS env is not valid JSON: ${e.message}`);
+      process.exit(1);
+    }
+  }
 
   let config;
   let repoVersions;
@@ -243,7 +259,7 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  probe({ config, repoVersions, toolsDir }).then((rows) => {
+  probe({ config, repoVersions, toolsDir, excludedApps }).then((rows) => {
     let errors = 0;
     for (const r of rows) {
       if (r.appId === null) {

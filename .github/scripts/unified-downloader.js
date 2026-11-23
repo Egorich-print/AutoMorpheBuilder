@@ -161,6 +161,9 @@ async function resolveApkmirrorReleaseSlug(apkmirrorPath, version, opts = {}) {
       if (!resp || !resp.ok()) {
         throw new Error(`page.goto HTTP ${resp ? resp.status() : 'no response'}`);
       }
+      // The anti-bot challenge resolves itself and reloads the real page;
+      // scraping before that yields a DOM without any release links.
+      await waitForPageContent(page, 'a[href$="-release/"]');
       html = await page.content();
     } else {
       // codeql[js/file-access-to-http] reason: listUrl is APKMirror's
@@ -1069,6 +1072,35 @@ async function downloadWithApkmirrorApi(packageId, version, outputDir) {
  * Download APK via Playwright by navigating the full 3-page APKMirror flow
  * within one browser session — avoids session-cookie dependency for download.php.
  */
+/**
+ * Wait until an element the scraper depends on is present on the page.
+ *
+ * APKMirror answers a headless Chromium navigation with an anti-bot
+ * challenge ("Performing security verification") that solves itself in
+ * the browser and then swaps the DOM for the real page.
+ * `page.goto(..., {waitUntil: 'domcontentloaded'})` resolves on the
+ * *challenge* document, so scraping right after it yields a DOM with
+ * zero `.table-row` elements and `selectVariant` then reports "No
+ * matching variant found on APKMirror. Available: none" — which reads
+ * like "this app has no arm64 build" and sent the build pipeline
+ * hunting for the wrong cause. Waiting for the selector we actually
+ * need survives the challenge: the challenge's own reload swaps in the
+ * real DOM and the selector appears a few seconds later.
+ *
+ * @param {import('playwright').Page} page
+ * @param {string} selector
+ * @param {number} timeoutMs
+ * @returns {Promise<boolean>} true if the selector appeared in time
+ */
+async function waitForPageContent(page, selector, timeoutMs = 60000) {
+  try {
+    await page.waitForSelector(selector, { timeout: timeoutMs, state: 'attached' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function downloadViaPlaywright(apkmirrorPath, version, outputDir) {
   const config = loadConfig();
   const preferredArch = config.preferred_arch || 'arm64-v8a';
@@ -1094,6 +1126,7 @@ async function downloadViaPlaywright(apkmirrorPath, version, outputDir) {
     const page1Url = await resolveApkmirrorReleaseSlug(apkmirrorPath, version, { page });
     console.error(`[apkmirror-pw] Page 1: ${page1Url}`);
     await page.goto(page1Url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await waitForPageContent(page, '.table-row');
     const $1 = cheerio.load(await page.content());
     const variantHref = selectVariant($1, priorities);
 
@@ -1101,6 +1134,7 @@ async function downloadViaPlaywright(apkmirrorPath, version, outputDir) {
     const page2Url = `https://www.apkmirror.com${variantHref}`;
     console.error(`[apkmirror-pw] Page 2: ${page2Url}`);
     await page.goto(page2Url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await waitForPageContent(page, 'a.downloadButton[href]');
     const $2 = cheerio.load(await page.content());
     const dlButtonHref = $2('a.downloadButton[href]').attr('href');
     if (!dlButtonHref) throw new Error('Download button not found on APKMirror variant page');
@@ -1109,6 +1143,7 @@ async function downloadViaPlaywright(apkmirrorPath, version, outputDir) {
     const page3Url = `https://www.apkmirror.com${dlButtonHref}`;
     console.error(`[apkmirror-pw] Page 3: ${page3Url}`);
     await page.goto(page3Url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await waitForPageContent(page, '#download-link[href]');
     // APKMirror shows a cookie/consent popup on this page that blocks clicks.
     // The button text is exactly "AGREE" (InMobi CMP). Dismiss it before
     // trying to click the download link, otherwise the click is intercepted.
@@ -1351,6 +1386,7 @@ async function resolveApkmirrorUrlViaPlaywright(apkmirrorPath, version, prioriti
     const page1Url = await resolveApkmirrorReleaseSlug(apkmirrorPath, version, { page });
     console.error(`[apkmirror-scraper] Page 1 (PW): ${page1Url}`);
     await page.goto(page1Url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await waitForPageContent(page, '.table-row');
     const html1 = await page.content();
     const $1 = cheerio.load(html1);
     const variantHref = selectVariant($1, priorities);
@@ -1359,6 +1395,7 @@ async function resolveApkmirrorUrlViaPlaywright(apkmirrorPath, version, prioriti
     const page2Url = `https://www.apkmirror.com${variantHref}`;
     console.error(`[apkmirror-scraper] Page 2 (PW): ${page2Url}`);
     await page.goto(page2Url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await waitForPageContent(page, 'a.downloadButton[href]');
     const html2 = await page.content();
     const $2 = cheerio.load(html2);
     const downloadButtonHref = $2('a.downloadButton[href]').attr('href');
@@ -1370,6 +1407,7 @@ async function resolveApkmirrorUrlViaPlaywright(apkmirrorPath, version, prioriti
     const page3Url = `https://www.apkmirror.com${downloadButtonHref}`;
     console.error(`[apkmirror-scraper] Page 3 (PW): ${page3Url}`);
     await page.goto(page3Url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await waitForPageContent(page, '#download-link[href]');
     const html3 = await page.content();
     const $3 = cheerio.load(html3);
     const finalHref =

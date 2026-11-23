@@ -284,3 +284,87 @@ They restore the check job's bounded URL cache and package-isolated pre-download
 under `tools/apks/<package-id>/`. Browser fallback setup runs only when no local
 candidate passes the ABI check. The large browser artifact is no longer transferred
 to every matrix job; Actions caches preserve browser executable modes.
+
+## "Could not resolve release tag for <repo>" — the upstream patch repo is gone
+
+**Symptom.** The `check-versions` job fails before any app is built:
+
+```
+::warning::No stable release found for owner/repo; falling back to latest release (pre-release/draft).
+::error::Could not resolve release tag for owner/repo (branch=main).
+```
+
+**Cause.** The patch repository is no longer readable. Two very different
+situations look identical through the release API alone:
+
+- GitHub **blocked** the repository (a terms-of-service violation answers every
+  API call with `403` and a `Repository access blocked` body);
+- the repository was **deleted or renamed** (`404` / `Not Found`).
+
+`resolve_release_tag` now diagnoses which one it is and says so in the log
+(`repo_access_state`): *"is blocked by GitHub (terms-of-service violation)"* or
+*"does not exist (deleted or renamed)"*.
+
+**Fix.** Point the app at a live patch repo that still ships its package, or
+remove the app. `hoo-dles/morphe-patches` was blocked on 2026-11-18 and took
+Sofascore's patches with it; `heval99/Heval-Morphe-Patches` ships the same
+`Disable ads` patch and replaced it.
+
+**Blast radius.** One dead upstream no longer takes the whole build down: the
+apps on that repo are excluded from the matrix (loud `::warning::` plus the
+`excluded-apps` output) and every other app still ships. The build only fails
+when *every* app ends up excluded.
+
+## "package id ... not listed in <repo>@<tag>'s patches-list.json"
+
+**Symptom.** The `Preflight per-app patch availability` step fails.
+
+**Cause.** The upstream patch bundle no longer lists the app's package id —
+usually because upstream **dropped support** for that app (`RookieEnough/De-Vanced`
+removed `tv.twitch.android.app` in v1.6.3).
+
+**Fix.** Pin the app to the last bundle that still ships it:
+
+```json
+"tv.twitch.android.app": {
+  "name": "twitch",
+  "repo": "RookieEnough/De-Vanced",
+  "branch": "main",
+  "pin_patch_tag": "v1.6.2"
+}
+```
+
+`pin_patch_tag` short-circuits tag resolution for that app only; the other apps
+on the same repo keep tracking the latest release.
+
+**Blast radius.** For an app the maintainer already configured (a non-empty
+patch selection in `patches.json`), a missing upstream entry is an upstream
+regression: the app is excluded from the build and the rest still ships. For an
+app with **no** selection the entry is most likely a typo in `config.json`, so
+it stays a hard error.
+
+## "No matching variant found on APKMirror. Available: none"
+
+**Symptom.** The APK download fails although the version exists on APKMirror:
+
+```
+[apkmirror] Failed: No matching variant found on APKMirror. Available: none
+```
+
+**Cause.** APKMirror answered the headless browser with a **Cloudflare
+anti-bot challenge** ("Performing security verification"). Visiting
+`/all-versions/` triggers the challenge, and it carries over into the next
+navigation in the same browser session. `page.goto(..., {waitUntil:
+'domcontentloaded'})` resolves on the challenge document, so the scraper saw a
+DOM with no `.table-row` elements at all — which reads exactly like "this app
+has no arm64 build".
+
+**Fix.** The scraper waits for the element it actually needs after every
+navigation (`waitForPageContent` in `unified-downloader.js`); the challenge
+solves itself in the browser and replaces the DOM.
+
+**If it still fails**, the fallback chain has run out of options:
+`apkeep` cannot serve a version APKPure has already dropped, and the
+`apkmirror-api` rung is skipped because `APKMIRROR_API_USER` /
+`APKMIRROR_API_PASS` are not configured for this repository. Setting those two
+secrets restores the API path (an APKMirror account is required).

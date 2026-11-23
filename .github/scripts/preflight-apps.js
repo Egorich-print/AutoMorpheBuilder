@@ -28,6 +28,7 @@
  *     rows:     [{appId, name, repo, tag, pkgListed, fetchOk, error?}, ...],
  *     errors:   [{appId, message}, ...],
  *     warnings: [{appId, message}, ...],
+ *     excluded: [appId, ...],
  *   }
  *
  * Per (repo, tag) we cache one patches-list.json response across all
@@ -38,6 +39,28 @@
  * CLI: reads $CONFIG_FILE + $REPO_VERSIONS from env, calls `preflight`,
  * writes a markdown table to $GITHUB_STEP_SUMMARY, prints one log
  * line per row, and exits non-zero on any error.
+ *
+ * ## Failing open per app, closed for the whole build
+ *
+ * A patch repo can stop shipping an app without warning: upstream drops
+ * the package id from `patches-list.json`, blocks the repo, or renames
+ * it. That used to be fatal for the *entire* pipeline — the daily
+ * build was red and not one app shipped, for three weeks, because of a
+ * single app whose patch source had gone away.
+ *
+ * So a per-app upstream failure now excludes that app from the matrix
+ * (loudly: a warning, a row in the step summary, and the
+ * `excluded-apps` workflow output) while every other app keeps
+ * building. Two rules keep that from hiding real mistakes:
+ *
+ *   1. Only apps the maintainer already configured are excluded. An
+ *      app with a non-empty patch selection in patches.json was
+ *      demonstrably working before, so a missing upstream entry means
+ *      "upstream dropped it". An app *without* such a selection was
+ *      never verified — most likely a typo in config.json — and stays
+ *      a hard error.
+ *   2. If every app ends up excluded, the build fails: shipping
+ *      nothing while reporting success is not an option.
  */
 
 const { patchTag } = require('./build-plan');
@@ -98,19 +121,55 @@ function collectPkgIds(patchesList) {
  * is the network abstraction. Tests pass a stub; production uses
  * global `fetch`.
  */
-async function preflight({ config, repoVersions, fetchImpl = fetch }) {
+/**
+ * Compute the set of apps that the maintainer has already configured.
+ *
+ * An app counts as "known good" when patches.json holds a non-empty
+ * patch selection for it — under its own repo or, after a repo move,
+ * under any other repo (same fallback the merge logic uses). Such an
+ * app was demonstrably building at some point, so an upstream that no
+ * longer lists it dropped support on purpose. An app without a
+ * selection was never verified and is most likely a typo, which must
+ * stay a hard error.
+ *
+ * @param {object} config  parsed config.json
+ * @param {object} patches parsed patches.json
+ * @returns {Set<string>} appIds
+ */
+function knownGoodApps(config, patches) {
+  const good = new Set();
+  for (const [appId, entry] of Object.entries((config && config.patch_repos) || {})) {
+    let selection = (patches && patches[entry.repo] && patches[entry.repo][appId]) || null;
+    if (!selection && patches) {
+      for (const apps of Object.values(patches)) {
+        if (apps && apps[appId]) { selection = apps[appId]; break; }
+      }
+    }
+    if (selection && Object.keys(selection).length > 0) good.add(appId);
+  }
+  return good;
+}
+
+async function preflight({ config, repoVersions, fetchImpl = fetch, excludedApps = [], patches = {} }) {
   const rows = [];
   const errors = [];
   const warnings = [];
+  const excluded = [];
 
   if (!config || !config.patch_repos || typeof config.patch_repos !== 'object') {
     errors.push({ appId: null, message: 'config.patch_repos missing or invalid.' });
-    return { rows, errors, warnings };
+    return { rows, errors, warnings, excluded };
   }
+
+  // Apps excluded upstream (unusable patch repo) are already out of the
+  // matrix — do not fetch for them and do not turn them into errors.
+  const alreadyExcluded = new Set(excludedApps);
+  const knownGood = knownGoodApps(config, patches);
 
   // Group apps by repo so we can dedupe upstream fetches.
   const appsByRepo = new Map(); // repo -> [{appId, entry, tag}]
   for (const [appId, entry] of Object.entries(config.patch_repos)) {
+    if (alreadyExcluded.has(appId)) continue;
     const repo = entry.repo;
     // pin_patch_tag overrides the resolved tag for this app's repo
     // (mirror check_versions.sh lines 63-69).
@@ -177,21 +236,35 @@ async function preflight({ config, repoVersions, fetchImpl = fetch }) {
           : null; // null = unknown (fetch failed)
 
         let error;
+        let message;
         if (!listResult.ok) {
-          error = listResult.error;
-          errors.push({
-            appId,
-            message:
-              `[${repo}@${tag}] could not fetch patches-list.json: ${listResult.error}. ` +
-              `Either the tag doesn't exist upstream or GitHub is rate-limiting. ` +
-              `Run \`gh release view --repo ${repo} --json tagName\` to verify the tag.`,
-          });
+          message =
+            `[${repo}@${tag}] could not fetch patches-list.json: ${listResult.error}. ` +
+            `Either the tag doesn't exist upstream or GitHub is rate-limiting. ` +
+            `Run \`gh release view --repo ${repo} --json tagName\` to verify the tag.`;
         } else if (!pkgListed) {
           const sample = [...pkgIdsInList].slice(0, 5).join(', ') || '(none)';
-          error = `package id "${appId}" not listed in ${repo}@${tag}'s patches-list.json ` +
-                  `(sample of what IS listed: ${sample}). ` +
-                  `Did you typo the package id, or does the patch repo not yet ship patches for it?`;
-          errors.push({ appId, message: error });
+          message = `package id "${appId}" not listed in ${repo}@${tag}'s patches-list.json ` +
+                    `(sample of what IS listed: ${sample}). ` +
+                    `Did you typo the package id, or does the patch repo not yet ship patches for it?`;
+        }
+
+        if (message) {
+          if (knownGood.has(appId)) {
+            // The maintainer configured this app before, so the upstream
+            // regression is on their side: exclude the app, keep the
+            // rest of the build alive.
+            warnings.push({
+              appId,
+              message: `${message} The app is excluded from this build; every other app still ships.`,
+            });
+            excluded.push(appId);
+          } else {
+            // Never configured (or configured with an empty selection):
+            // most likely a typo in config.json — fail the build.
+            error = message;
+            errors.push({ appId, message });
+          }
         }
 
         rows.push({
@@ -207,7 +280,7 @@ async function preflight({ config, repoVersions, fetchImpl = fetch }) {
     }
   }
 
-  return { rows, errors, warnings };
+  return { rows, errors, warnings, excluded };
 }
 
 /**
@@ -237,6 +310,7 @@ if (require.main === module) {
   const configPath = process.env.CONFIG_FILE || './config.json';
   const repoVersionsJson = process.env.REPO_VERSIONS || '{}';
   const summaryPath = process.env.GITHUB_STEP_SUMMARY || '';
+  const patchesPath = process.env.PATCHES_FILE || 'patches.json';
 
   if (!fs.existsSync(configPath)) {
     console.error(`::error::config file not found: ${configPath}`);
@@ -257,8 +331,26 @@ if (require.main === module) {
     console.error(`::error::REPO_VERSIONS env is not valid JSON: ${e.message}`);
     process.exit(1);
   }
+  let patches = {};
+  let excludedApps = [];
+  if (fs.existsSync(patchesPath)) {
+    try {
+      patches = JSON.parse(fs.readFileSync(patchesPath, 'utf8'));
+    } catch (e) {
+      console.error(`::error::${patchesPath} is not valid JSON: ${e.message}`);
+      process.exit(1);
+    }
+  }
+  if (process.env.EXCLUDED_APPS) {
+    try {
+      excludedApps = JSON.parse(process.env.EXCLUDED_APPS);
+    } catch (e) {
+      console.error(`::error::EXCLUDED_APPS env is not valid JSON: ${e.message}`);
+      process.exit(1);
+    }
+  }
 
-  preflight({ config, repoVersions }).then(({ rows, errors, warnings }) => {
+  preflight({ config, repoVersions, excludedApps, patches }).then(({ rows, errors, warnings, excluded }) => {
     // Log a one-line-per-app summary to the workflow log.
     for (const r of rows) {
       const tag = r.error ? '::error::' : '';
@@ -271,15 +363,33 @@ if (require.main === module) {
       console.error(`::warning::[${w.appId || '<top-level>'}] ${w.message}`);
     }
 
+    // The exclusion list travels to the next step: apps left out here
+    // must not re-enter the matrix in check_existing_releases.sh.
+    const allExcluded = [...new Set([...excludedApps, ...excluded])];
+    if (allExcluded.length > 0) {
+      console.error(`::warning::Excluded from this build: ${allExcluded.join(', ')}`);
+    }
+    if (process.env.GITHUB_OUTPUT) {
+      fs.appendFileSync(process.env.GITHUB_OUTPUT, `excluded-apps=${JSON.stringify(allExcluded)}\n`);
+    }
+
     if (summaryPath) {
       try {
         fs.appendFileSync(summaryPath,
           `\n## App preflight\n\n${renderTable(rows)}\n\n` +
-          (errors.length > 0 ? `**${errors.length} error(s)** — see workflow log.\n` : ''),
+          (errors.length > 0 ? `**${errors.length} error(s)** — see workflow log.\n` : '') +
+          (allExcluded.length > 0 ? `**${allExcluded.length} app(s) excluded:** ${allExcluded.join(', ')}\n` : ''),
         );
       } catch (e) {
         console.error(`::warning::could not write $GITHUB_STEP_SUMMARY (${e.message})`);
       }
+    }
+
+    // Excluding apps is only acceptable while something still ships.
+    const totalApps = Object.keys((config && config.patch_repos) || {}).length;
+    if (errors.length === 0 && totalApps > 0 && allExcluded.length >= totalApps) {
+      console.error(`::error::preflight: every app was excluded (${allExcluded.join(', ')}); there is nothing to build.`);
+      process.exit(1);
     }
 
     if (errors.length > 0) {
@@ -295,6 +405,7 @@ if (require.main === module) {
 
 module.exports = {
   preflight,
+  knownGoodApps,
   compatPkgNames,
   collectPkgIds,
   renderTable,

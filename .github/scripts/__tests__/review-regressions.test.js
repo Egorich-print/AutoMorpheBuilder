@@ -13,6 +13,12 @@ const { hasLocalInput } = require('../local-download-input');
 const { detectChanges } = require('../../../scripts/detect-new-repos');
 
 const root = path.resolve(__dirname, '../../..');
+
+// The shell entry points use `declare -A` and `mapfile` (bash 4+).
+// macOS still ships bash 3.2, so the cases that drive them are skipped
+// there; CI (ubuntu) and the Jenkins agent (Debian) run bash 5.
+const bashMajor = Number((process.env.BASH_VERSION || '0').split('.')[0]);
+const shellTest = bashMajor >= 4 ? test : test.skip;
 const config = { cli: { repo: 'cli/repo', branch: 'main' }, preferred_arch: 'arm64-v8a', patch_repos: {
   'com.dev': { name: 'dev-app', repo: 'a/patches', branch: 'dev' },
   'com.stable': { name: 'stable', repo: 'a/patches', branch: 'main' },
@@ -27,6 +33,13 @@ test('keeps main, dev and pins independent; deduplicates only identical repo/tag
   expect(new Set(entries.map((entry) => entry.patchSlug)).size).toBe(3);
   expect(entries[1].patchSlug).toBe(entries[3].patchSlug);
   expect(buildMatrix(config, { ...versions, 'com.latest': 'v4' })[3].patchSlug).not.toBe(entries[3].patchSlug);
+});
+
+test('excluded apps never reach the matrix', () => {
+  const all = buildMatrix(config, versions);
+  expect(all).toHaveLength(4);
+  const filtered = buildMatrix(config, versions, ['com.dev', 'com.pinned']);
+  expect(filtered.map((entry) => entry.appId)).toEqual(['com.stable', 'com.latest']);
 });
 
 test('accepts two-part versions and sorts unique supported versions numerically', () => {
@@ -149,7 +162,7 @@ describe('pipeline integration regressions', () => {
     return { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...extra };
   }
 
-  test('resolves independent main/dev/pinned selectors through the shell entry point', () => {
+  shellTest('resolves independent main/dev/pinned selectors through the shell entry point', () => {
     const configFile = path.join(dir, 'config.json');
     const output = path.join(dir, 'output');
     fs.writeFileSync(configFile, JSON.stringify(config));
@@ -160,6 +173,35 @@ describe('pipeline integration regressions', () => {
     expect(result.status).toBe(0);
     const line = fs.readFileSync(output, 'utf8').split('\n').find((value) => value.startsWith('matrix-include='));
     expect(JSON.parse(line.slice('matrix-include='.length)).map((entry) => entry.patchTag)).toEqual(['v3-dev.1', 'v2', 'v1', 'v2']);
+  });
+
+  shellTest('an unusable patch repo excludes its apps instead of killing the build', () => {
+    const configFile = path.join(dir, 'config.json');
+    const output = path.join(dir, 'output');
+    fs.writeFileSync(configFile, JSON.stringify({
+      cli: { repo: 'cli/repo', branch: 'main' },
+      patch_repos: {
+        'com.good': { name: 'good', repo: 'a/patches', branch: 'main' },
+        'com.dead': { name: 'dead', repo: 'dead/patches', branch: 'main' },
+      },
+    }));
+    // `gh release view` fails for dead/patches (upstream gone) and
+    // succeeds for the others.
+    command('gh', `
+case " $* " in
+  *"dead/patches"*) exit 1 ;;
+esac
+echo v2
+`);
+    const result = spawnSync('bash', [path.join(root, '.github/scripts/pipeline/check_versions.sh')], {
+      encoding: 'utf8', env: environment({ CONFIG_FILE: configFile, GITHUB_OUTPUT: output }),
+    });
+    expect(result.status).toBe(0);
+    const lines = fs.readFileSync(output, 'utf8').split('\n');
+    const excluded = lines.find((v) => v.startsWith('excluded-apps='));
+    expect(JSON.parse(excluded.slice('excluded-apps='.length))).toEqual(['com.dead']);
+    const matrix = lines.find((v) => v.startsWith('matrix-include='));
+    expect(JSON.parse(matrix.slice('matrix-include='.length)).map((e) => e.appId)).toEqual(['com.good']);
   });
 
   test.each(['wrong-package', 'unreadable', 'valid'])('validates the exact cached APK through the CLI (%s)', (scenario) => {
@@ -189,7 +231,7 @@ describe('pipeline integration regressions', () => {
     else expect(outputs).not.toContain('apk=');
   });
 
-  test('replaces existing APK/checksum/provenance assets and preserves hyphenated names', () => {
+  shellTest('replaces existing APK/checksum/provenance assets and preserves hyphenated names', () => {
     const apks = path.join(dir, 'apks');
     fs.mkdirSync(apks);
     const filename = 'dev-app-v24.3-v3-dev.1.apk';
@@ -214,7 +256,7 @@ describe('pipeline integration regressions', () => {
   });
 });
 
-test('parallel pre-download attempts receive separate package directories', () => {
+shellTest('parallel pre-download attempts receive separate package directories', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'predownload-isolation-'));
   try {
     const bin = path.join(dir, 'bin');

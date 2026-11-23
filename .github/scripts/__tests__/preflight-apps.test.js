@@ -3,6 +3,7 @@
 
 const {
   preflight,
+  knownGoodApps,
   compatPkgNames,
   collectPkgIds,
   renderTable,
@@ -281,5 +282,78 @@ describe('preflight', () => {
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0].appId).toBeNull();
     expect(result.rows).toEqual([]);
+  });
+});
+// --- per-app exclusion (fail open per app, closed for the whole build) ----
+
+describe('knownGoodApps', () => {
+  test('an app with a non-empty selection is known good', () => {
+    const patches = { 'hoo-dles/morphe-patches': { 'com.getmimo': { 'Enable Pro': true } } };
+    expect([...knownGoodApps(mimoConfig(), patches)]).toEqual(['com.getmimo']);
+  });
+
+  test('an app with an empty selection is not known good (looks like a typo)', () => {
+    const patches = { 'hoo-dles/morphe-patches': { 'com.getmimo': {} } };
+    expect([...knownGoodApps(mimoConfig(), patches)]).toEqual([]);
+  });
+
+  test('an app that only exists under another repo key is still known good', () => {
+    const patches = { 'old/repo': { 'com.getmimo': { 'Enable Pro': false } } };
+    expect([...knownGoodApps(mimoConfig(), patches)]).toEqual(['com.getmimo']);
+  });
+
+  test('no patches.json at all → nothing is known good', () => {
+    expect([...knownGoodApps(mimoConfig(), {})]).toEqual([]);
+  });
+});
+
+describe('preflight — exclusions', () => {
+  const knownGoodPatches = { 'hoo-dles/morphe-patches': { 'com.getmimo': { 'Enable Pro': true } } };
+
+  test('a configured app whose package vanished upstream is excluded, not an error', async () => {
+    const fetchImpl = makeStub({
+      '/hoo-dles/morphe-patches/v9.11/patches-list.json': { status: 200, body: { patches: [] } },
+    });
+    const result = await preflight({
+      config: mimoConfig(), repoVersions: mimoRepoVersions, fetchImpl, patches: knownGoodPatches,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.excluded).toEqual(['com.getmimo']);
+    expect(result.warnings[0].message).toMatch(/excluded from this build/);
+  });
+
+  test('an app that was never configured stays a hard error (typo guard)', async () => {
+    const fetchImpl = makeStub({
+      '/hoo-dles/morphe-patches/v9.11/patches-list.json': { status: 200, body: { patches: [] } },
+    });
+    const result = await preflight({
+      config: mimoConfig(), repoVersions: mimoRepoVersions, fetchImpl, patches: {},
+    });
+    expect(result.errors).toHaveLength(1);
+    expect(result.excluded).toEqual([]);
+  });
+
+  test('an unreachable upstream for a configured app is excluded, not an error', async () => {
+    const fetchImpl = makeStub({});
+    const result = await preflight({
+      config: mimoConfig(), repoVersions: mimoRepoVersions, fetchImpl, patches: knownGoodPatches,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.excluded).toEqual(['com.getmimo']);
+  });
+
+  test('apps excluded upstream are not fetched and not reported', async () => {
+    let fetchCount = 0;
+    const fetchImpl = async () => {
+      fetchCount++;
+      return { ok: false, status: 404, json: async () => null };
+    };
+    const result = await preflight({
+      config: mimoConfig(), repoVersions: mimoRepoVersions, fetchImpl,
+      excludedApps: ['com.getmimo'], patches: knownGoodPatches,
+    });
+    expect(fetchCount).toBe(0);
+    expect(result.rows).toEqual([]);
+    expect(result.errors).toEqual([]);
   });
 });

@@ -40,6 +40,10 @@ jobs:
       cli-branch: ${{ steps.check.outputs.cli-branch }}
       cli-repo: ${{ steps.check.outputs.cli-repo }}
       skip-list: ${{ steps.filter.outputs.skip-list }}
+      # Apps excluded from this build (unusable patch repo / upstream
+      # no longer lists the package). Preflight merges its own findings
+      # into the list; the filter step drops them from the matrix.
+      excluded-apps: ${{ steps.preflight.outputs.excluded-apps }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -109,6 +113,7 @@ jobs:
         env:
           CONFIG_FILE: ${{ github.workspace }}/config.json
           REPO_VERSIONS: ${{ steps.check.outputs.repo-versions }}
+          EXCLUDED_APPS: ${{ steps.check.outputs.excluded-apps }}
         run: node .github/scripts/preflight-apps.js
 
       - name: Download morphe-desktop + patches .mpp
@@ -120,6 +125,9 @@ jobs:
           CLI_REPO: ${{ steps.check.outputs.cli-repo }}
           CLI_TAG: ${{ steps.check.outputs.cli-version }}
           REPO_VERSIONS: ${{ steps.check.outputs.repo-versions }}
+          # Apps on an unusable patch repo are excluded, so their .mpp
+          # is never downloaded (the release archive does not exist).
+          EXCLUDED_APPS: ${{ steps.check.outputs.excluded-apps }}
         run: bash .github/scripts/pipeline/download_morphe_tools.sh
 
       - name: Compat probe (per-app runtime check)
@@ -129,6 +137,7 @@ jobs:
           CONFIG_FILE: ${{ github.workspace }}/config.json
           REPO_VERSIONS: ${{ steps.check.outputs.repo-versions }}
           TOOLS_DIR: ${{ env.TOOLS_DIR }}
+          EXCLUDED_APPS: ${{ steps.check.outputs.excluded-apps }}
         run: node .github/scripts/compat-probe.js
 
       - name: Filter matrix by existing releases
@@ -147,6 +156,7 @@ jobs:
           TOOLS_DIR: tools
           CLI_VERSION: ${{ steps.check.outputs.cli-version }}
           FORCE_BUILD: ${{ github.event_name == 'workflow_dispatch' }}
+          EXCLUDED_APPS: ${{ steps.preflight.outputs.excluded-apps }}
         run: bash .github/scripts/pipeline/check_existing_releases.sh
 
       - name: Cache Playwright browsers
@@ -207,6 +217,7 @@ jobs:
           APKMIRROR_API_USER: ${{ secrets.APKMIRROR_API_USER }}
           APKMIRROR_API_PASS: ${{ secrets.APKMIRROR_API_PASS }}
           SKIP_LIST: ${{ steps.filter.outputs.skip-list }}
+          EXCLUDED_APPS: ${{ steps.preflight.outputs.excluded-apps }}
           ANDROID_HOME: /tmp/android-sdk
           ANDROID_BUILD_TOOLS_VERSION: ${{ steps.aapt.outputs.ANDROID_BUILD_TOOLS_VERSION }}
         run: bash .github/scripts/pipeline/pre_download_apks.sh

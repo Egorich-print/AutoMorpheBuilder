@@ -161,7 +161,21 @@ function main() {
   const jarPath = path.join(TOOLS_DIR, 'morphe-desktop.jar');
   const resolvedVersions = fs.existsSync(path.join(TOOLS_DIR, 'supported-versions.json'))
     ? JSON.parse(fs.readFileSync(path.join(TOOLS_DIR, 'supported-versions.json'), 'utf8')) : {};
-  const matrix = buildMatrix(config, repoVersions).map((entry) => ({
+  // Apps excluded upstream (unusable patch repo, or a package the
+  // upstream no longer lists) must not re-enter the matrix here.
+  let excludedApps = [];
+  if (process.env.EXCLUDED_APPS) {
+    try {
+      excludedApps = JSON.parse(process.env.EXCLUDED_APPS);
+    } catch (e) {
+      console.error(`::error::EXCLUDED_APPS env is not valid JSON: ${e.message}`);
+      process.exit(1);
+    }
+  }
+  if (excludedApps.length > 0) {
+    console.log(`::warning::Excluding ${excludedApps.length} app(s) from the matrix: ${excludedApps.join(', ')}`);
+  }
+  const matrix = buildMatrix(config, repoVersions, excludedApps).map((entry) => ({
     ...entry, buildFingerprint: appFingerprint(config, patches, entry.appId, process.env.CLI_VERSION || '', pipeline), targetVersion: config.patch_repos[entry.appId].pin_version || resolvedVersions[entry.appId]?.[0] || '',
   }));
 

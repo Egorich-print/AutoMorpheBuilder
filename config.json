@@ -25,7 +25,7 @@
     },
     "com.sofascore.results": {
       "name": "sofascore",
-      "repo": "hoo-dles/morphe-patches",
+      "repo": "heval99/Heval-Morphe-Patches",
       "branch": "main",
       "apkmirror_path": "sofascore/soccer-scores-and-sports-livescore-sofascore",
       "display_name": "Sofascore"
@@ -34,6 +34,7 @@
       "name": "twitch",
       "repo": "RookieEnough/De-Vanced",
       "branch": "main",
+      "pin_patch_tag": "v1.6.2",
       "apkmirror_path": "twitch-interactive-inc/twitch-live-streaming",
       "display_name": "Twitch"
     },

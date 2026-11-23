@@ -111,7 +111,7 @@ The repo **must** publish `.mpp` artifacts. If it does not, the per-app `Preflig
 
 Edit the app's existing `patch_repos` entry and change `repo` (and `branch` / `pin_patch_tag` if needed) in the same commit. The next push to `main`:
 
-1. `update-patches.yml` detects the relocation — the destination repo *already exists* in `patches.json` (carrying other apps like `mimo` next to `hoo-dles/morphe-patches`) doesn't matter; the gate opens on a relocated app just as it does on a brand-new repo (`scripts/detect-new-repos.js`, unit-tested in `.github/scripts/__tests__/detect-new-repos.test.js`).
+1. `update-patches.yml` detects the relocation — the destination repo *already exists* in `patches.json` doesn't matter; the gate opens on a relocated app just as it does on a brand-new repo (`scripts/detect-new-repos.js`, unit-tested in `.github/scripts/__tests__/detect-new-repos.test.js`).
 2. `sync-patches.sh` rebuilds the section under the destination repo. For each app under that destination, it looks up the user's existing per-patch toggles — first in the destination's own entry, then falling back to the entry under any other repo where the app lives. Explicit `false` toggles (e.g. `Disable telemetry: false`) are preserved across the move.
 3. After merge, the trailing `ACTIVE_REPOS` filter drops the now-unreferenced source repo (`heval99/morphe-patches`), leaving the app's toggles intact under the new repo.
 
@@ -167,7 +167,9 @@ When set:
 | Required | no |
 | Example | `"v1.18.3"` |
 
-Lock the patches tag to this exact release, bypassing `gh release list` on the patches repo. Currently used by `nzb360` and `aida64` because their upstream `rushiranpise/morphe-patches` ships patches tags that lag the morphe-desktop CLI API surface.
+Lock the patches tag to this exact release, bypassing `gh release list` on the patches repo. Currently used by `nzb360`, whose upstream `rushiranpise/morphe-patches` ships patches tags that lag the morphe-desktop CLI API surface, and by `twitch`, whose upstream `RookieEnough/De-Vanced` dropped `tv.twitch.android.app` from its `patches-list.json` in v1.6.3 — the pin holds the app on the last bundle that still ships it.
+
+Use a pin when the *upstream* regresses (a bundle that the CLI cannot run, or a release that no longer contains the app). A pin applies to that app only; other apps on the same repo keep tracking the latest release.
 
 #### `display_name` (optional)
 
@@ -177,7 +179,7 @@ Lock the patches tag to this exact release, bypassing `gh release list` on the p
 | Required | no |
 | Example | `"YouTube Music"` |
 
-Human-readable name rendered in `README.md`'s **Tested apps** / **Releases & Obtainium** tables and embedded in the Obtainium deep-link's `name` field. The `name` field is a build slug (lowercase letters/digits/hyphens) baked into release tags, so IDs like `ytmusic`, `nzb360`, and `aida64` cannot be humanised by capitalisation alone — set `display_name` explicitly for those.
+Human-readable name rendered in `README.md`'s **Tested apps** / **Releases & Obtainium** tables and embedded in the Obtainium deep-link's `name` field. The `name` field is a build slug (lowercase letters/digits/hyphens) baked into release tags, so IDs like `ytmusic`, `nzb360`, and `flightradar24` cannot be humanised by capitalisation alone — set `display_name` explicitly for those.
 
 When `display_name` is omitted, the generator falls back to a capitalised `name` (so `nzb360` renders as `Nzb360` if no `display_name` is set). The field stays optional so adding a new app entry never blocks on picking a pretty name.
 
@@ -250,14 +252,13 @@ Shape:
   "preferred_arch": "arm64-v8a",
   "auto_update_urls": true,
   "patch_repos": {
-    "com.google.android.youtube":                { "name": "youtube", "repo": "MorpheApp/morphe-patches",     "branch": "main", "apkmirror_path": "google-inc/youtube" },
+    "com.google.android.youtube":                { "name": "youtube", "repo": "MorpheApp/morphe-patches",     "branch": "dev",  "apkmirror_path": "google-inc/youtube" },
     "com.google.android.apps.youtube.music":     { "name": "ytmusic", "repo": "MorpheApp/morphe-patches",     "branch": "main", "apkmirror_path": "google-inc/youtube-music" },
     "com.reddit.frontpage":                      { "name": "reddit",  "repo": "MorpheApp/morphe-patches",     "branch": "main", "apkmirror_path": "redditinc/reddit" },
-    "com.sofascore.results":                     { "name": "sofascore","repo": "hoo-dles/morphe-patches",    "branch": "main", "apkmirror_path": "sofascore/soccer-scores-and-sports-livescore-sofascore" },
-    "tv.twitch.android.app":                     { "name": "twitch",  "repo": "RookieEnough/De-Vanced",       "branch": "main", "apkmirror_path": "twitch-interactive-inc/twitch-live-streaming" },
+    "com.sofascore.results":                     { "name": "sofascore","repo": "heval99/Heval-Morphe-Patches", "branch": "main", "apkmirror_path": "sofascore/soccer-scores-and-sports-livescore-sofascore" },
+    "tv.twitch.android.app":                     { "name": "twitch",  "repo": "RookieEnough/De-Vanced",       "branch": "main", "apkmirror_path": "twitch-interactive-inc/twitch-live-streaming", "pin_patch_tag": "v1.6.2" },
     "com.kevinforeman.nzb360":                   { "name": "nzb360",  "repo": "rushiranpise/morphe-patches",  "branch": "main", "apkmirror_path": "kevin-foreman/nzb360",          "pin_patch_tag": "v1.18.3" },
-    "com.finalwire.aida64":                      { "name": "aida64",  "repo": "rushiranpise/morphe-patches",  "branch": "main", "apkmirror_path": "finalwire-ltd/aida64",          "pin_patch_tag": "v1.18.3" },
-    "com.getmimo":                               { "name": "mimo",    "repo": "hoo-dles/morphe-patches",       "branch": "main", "apkmirror_path": "mimohello-gmbh/mimohello-mimo-learn-to-code" }
+    "com.flightradar24free":                     { "name": "flightradar24","repo": "rushiranpise/morphe-patches", "branch": "main", "apkmirror_path": "flightradar24-ab/flightradar24-flight-tracker-2" }
   },
   "cli":             { "repo": "MorpheApp/morphe-desktop", "branch": "main" },
   "download_urls":   { /* see file */ }

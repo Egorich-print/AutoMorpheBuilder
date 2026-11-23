@@ -45,12 +45,25 @@ while IFS='|' read -r repo branch pin_tag; do
     tag="$pin_tag"
   else
     log "Resolving tag for ${repo} (branch=${branch})..."
-    tag="$(resolve_release_tag "$repo" "$branch")"
+    rc=0
+    tag="$(resolve_release_tag "$repo" "$branch")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      # A patch repo we cannot read — blocked by GitHub, deleted, renamed,
+      # or simply without a resolvable release — must not take the whole
+      # daily build down. The apps that depend on it are excluded from
+      # the matrix (loudly, see EXCLUDED_APPS below) and every other app
+      # still ships. Before this, one dead upstream repo kept the entire
+      # pipeline red for three weeks and no app was released at all.
+      log_warn "Patch repo ${repo} (branch=${branch}) is unusable (rc=${rc}); its apps are excluded from this build."
+      continue
+    fi
     log "  ${repo} -> ${tag}"
   fi
   REPO_TAGS["$repo|$branch|$pin_tag"]="$tag"
 done <<< "$REPO_PAIRS"
 
+# The CLI is not per-app: without it nothing can be patched at all, so a
+# failure here stays fatal (set -e aborts the script).
 CLI_TAG="$(resolve_release_tag "$CLI_REPO" "$CLI_BRANCH")"
 log "CLI (${CLI_REPO}) -> ${CLI_TAG}"
 
@@ -60,10 +73,31 @@ TAGS_JSON='{}'
 for selector in "${!REPO_TAGS[@]}"; do
   TAGS_JSON="$(jq -c --arg key "$selector" --arg tag "${REPO_TAGS[$selector]}" '. + {($key): $tag}' <<<"$TAGS_JSON")"
 done
+# Only apps whose selector resolved are kept; the rest are excluded.
 REPO_VERSIONS="$(jq -c --argjson tags "$TAGS_JSON" '
-  .patch_repos | to_entries | map({(.key): $tags[(.value.repo + "|" + (.value.branch | ascii_downcase) + "|" + (.value.pin_patch_tag // ""))]}) | add
+  .patch_repos
+  | to_entries
+  | map(select($tags[(.value.repo + "|" + (.value.branch | ascii_downcase) + "|" + (.value.pin_patch_tag // ""))] != null))
+  | map({(.key): $tags[(.value.repo + "|" + (.value.branch | ascii_downcase) + "|" + (.value.pin_patch_tag // ""))]})
+  | add // {}
 ' "$CONFIG_FILE")"
-MATRIX_WITH_TAGS="$(REPO_VERSIONS="$REPO_VERSIONS" node "$(dirname "$0")/../build-plan.js")"
+EXCLUDED_APPS="$(jq -c --argjson tags "$TAGS_JSON" '
+  .patch_repos
+  | to_entries
+  | map(select($tags[(.value.repo + "|" + (.value.branch | ascii_downcase) + "|" + (.value.pin_patch_tag // ""))] == null) | .key)
+' "$CONFIG_FILE")"
+
+TOTAL_APPS="$(jq -r '.patch_repos | length' "$CONFIG_FILE")"
+KEPT_APPS="$(jq -r 'length' <<<"$REPO_VERSIONS")"
+if [ "$KEPT_APPS" -eq 0 ]; then
+  log_error "No app has a usable patch repo — there is nothing to build."
+  exit 1
+fi
+if [ "$KEPT_APPS" -lt "$TOTAL_APPS" ]; then
+  log_warn "Excluded $((TOTAL_APPS - KEPT_APPS)) of $TOTAL_APPS app(s) with an unusable patch repo: $(jq -r 'join(", ")' <<<"$EXCLUDED_APPS")"
+fi
+
+MATRIX_WITH_TAGS="$(REPO_VERSIONS="$REPO_VERSIONS" EXCLUDED_APPS="$EXCLUDED_APPS" node "$(dirname "$0")/../build-plan.js")"
 
 # --- decide + emit -------------------------------------------------------
 
@@ -77,6 +111,7 @@ log "Default should-build=true; check_existing_releases.sh will override if all 
 
 json_set_output matrix-include "$MATRIX_WITH_TAGS"
 json_set_output repo-versions "$REPO_VERSIONS"
+json_set_output excluded-apps "$EXCLUDED_APPS"
 json_set_output cli-version "$CLI_TAG"
 json_set_output cli-branch "$CLI_BRANCH"
 json_set_output cli-repo "$CLI_REPO"

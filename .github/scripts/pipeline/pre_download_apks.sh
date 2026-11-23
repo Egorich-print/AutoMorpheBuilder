@@ -140,6 +140,17 @@ if [ "$SKIP_LIST" != "[]" ] && [ -n "$SKIP_LIST" ]; then
   done < <(jq -r '.[]' <<<"$SKIP_LIST")
 fi
 
+# Apps excluded upstream (unusable patch repo) are not in the build
+# matrix and have no .mpp on disk — do not spend a download attempt on
+# them.
+if [ -n "${EXCLUDED_APPS:-}" ] && [ "$EXCLUDED_APPS" != "[]" ]; then
+  while IFS= read -r pkg; do
+    [ -n "$pkg" ] || continue
+    SKIPPED["$pkg"]=1
+    log "  [$pkg] excluded from this build; not pre-downloading."
+  done < <(jq -r '.[]' <<<"$EXCLUDED_APPS")
+fi
+
 buildable=()
 while IFS= read -r pkg; do
   if [ -n "${SKIPPED[$pkg]:-}" ]; then
