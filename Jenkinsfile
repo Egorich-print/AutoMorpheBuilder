@@ -148,9 +148,19 @@ pipeline {
                     // "env.REPO_HAS_RELEASE ? ... : ..." всегда срабатывало в
                     // первую сторону — и Jenkins не публиковал релиз НИ ОДНОГО
                     // репозитория, объявляя, что релиз создаёт сам репозиторий.
-                    env.REPO_HAS_RELEASE = (fileExists('.github/workflows/release.yml') ||
-                                            fileExists('.github/workflows/release.yaml') ||
-                                            fileExists('.github/workflows/ide-release.yml')) ? 'yes' : 'no'
+                    //
+                    // Список имён — не «release*.yml», а конкретные workflow'и,
+                    // которые правда публикуют релиз: у репозитория может быть
+                    // свой нейминг (у AutoMorpheBuilder — morphe-build.yml).
+                    // Если имя не попало в список, Jenkins считает, что релиз
+                    // создаёт он, и может опубликовать релиз поверх (или
+                    // вместо) релизного workflow'и репозитория.
+                    env.REPO_HAS_RELEASE = [
+                        '.github/workflows/release.yml',
+                        '.github/workflows/release.yaml',
+                        '.github/workflows/ide-release.yml',
+                        '.github/workflows/morphe-build.yml',
+                    ].any { fileExists(it) } ? 'yes' : 'no'
 
                     // Свой релизный скрипт репозитория — приоритет над базовым
                     // набором ассетов, по той же логике, что и гейт-скрипт:
@@ -339,10 +349,25 @@ pipeline {
                         if [ -d /srv/jenkins/archive/"${JOB_NAME}" ]; then
                           cp -a /srv/jenkins/archive/"${JOB_NAME}"/. dist/ 2>/dev/null || true
                         fi
-                        ( cd dist && sha256sum * > SHA256SUMS ) 2>/dev/null || true
+                        # SHA256SUMS создаётся ТОЛЬКО если в dist есть что
+                        # хешировать. Прежняя версия делала
+                        # `( cd dist && sha256sum * > SHA256SUMS ) || true`
+                        # безусловно: редирекция создаёт 0-байтовый файл даже
+                        # при пустом каталоге, а проверка «ls dist | wc -l»
+                        # считала его артефактом — Jenkins публиковал релиз
+                        # с одним пустым SHA256SUMS и без единого ассета.
+                        # `set -- dist/*` оставляет литерал при отсутствии
+                        # совпадений, поэтому `[ -e "$1" ]` корректно
+                        # проверяет пустоту (POSIX, без nullglob).
+                        set -- dist/*
+                        if [ -e "$1" ]; then
+                          ( cd dist && sha256sum * > SHA256SUMS )
+                        fi
                         ls -la dist
                     '''
-                    def hasAssets = sh(script: 'ls dist 2>/dev/null | wc -l', returnStdout: true).trim().toInteger() > 0
+                    // Считаем реальные ассеты, а не сгенерированный манифест:
+                    // релиз без вложений публиковать нельзя.
+                    def hasAssets = sh(script: 'find dist -maxdepth 1 -type f ! -name SHA256SUMS 2>/dev/null | wc -l', returnStdout: true).trim().toInteger() > 0
                     if (!hasAssets) {
                         echo 'Артефактов нет — релиз без вложений создавать не буду'
                         return
